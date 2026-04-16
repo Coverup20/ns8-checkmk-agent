@@ -1,22 +1,17 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 #
 # Copyright (C) 2025 Nethesis S.r.l.
 # SPDX-License-Identifier: GPL-2.0-only
 #
 
-# Check NethVoice trunk status via Podman exec into Asterisk container
-# Container-native version: uses podman socket instead of runagent
+# Check NethVoice trunk status via runagent + podman exec into Asterisk
 
 import json
-import http.client
-import os
 import re
-import socket as _socket
+import subprocess
 
-VERSION = "2.0.0"
 SERVICE_PREFIX = "NV8.Status.Trunk"
 SERVICE_SUMMARY = "NV8.Status.Trunks"
-PODMAN_SOCK = "/run/podman/podman.sock"
 
 STATE_MAP = {
     "Registered":     0,
@@ -36,120 +31,93 @@ STATUS_RE = re.compile(
 
 ## Utils
 
-class _UnixConn(http.client.HTTPConnection):
-    def connect(self):
-        self.sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-        self.sock.connect(PODMAN_SOCK)
-
-def _api_get(path):
+def run(cmd):
     try:
-        c = _UnixConn("d")
-        c.request("GET", f"/v4.0.0/libpod{path}")
-        r = c.getresponse()
-        return json.loads(r.read()) if r.status == 200 else None
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return p.returncode, p.stdout, p.stderr
+    except Exception as e:
+        return 1, "", str(e)
+
+def list_modules():
+    rc, out, _ = run(["runagent", "-l"])
+    if rc != 0:
+        return []
+    return [l.strip() for l in out.splitlines() if l.strip()]
+
+def podman_ps_json(module):
+    rc, out, _ = run(["runagent", "-m", module, "podman", "ps", "--all", "--format", "json"])
+    if rc != 0:
+        return None
+    try:
+        return json.loads(out)
     except:
         return None
 
-def _api_post(path, body):
-    try:
-        data = json.dumps(body).encode()
-        c = _UnixConn("d")
-        c.request("POST", f"/v4.0.0/libpod{path}", body=data,
-                  headers={"Content-Type": "application/json"})
-        r = c.getresponse()
-        raw = r.read()
-        return r.status, raw
-    except:
-        return 0, b""
-
-def _parse_mux(raw):
-    """Parse Docker/podman multiplexed stdout stream."""
-    out = b""
-    i = 0
-    while i + 8 <= len(raw):
-        size = int.from_bytes(raw[i + 4:i + 8], "big")
-        out += raw[i + 8:i + 8 + size]
-        i += 8 + size
-    return out.decode("utf-8", errors="replace")
-
-def find_asterisk_container(containers):
+def find_asterisk_name(containers):
     for c in containers:
-        if c.get("IsInfra", False):
+        if c.get("IsInfra", False) or c.get("State") != "running":
             continue
-        if c.get("State") != "running":
-            continue
-        for n in c.get("Names", []):
+        for n in (c.get("Names") or []):
             if "asterisk" in n.lower() or "freepbx" in n.lower():
-                return c.get("Id", "")
+                return n.lstrip("/")
     return None
 
-def exec_asterisk(container_id, cmd_str):
-    status, raw = _api_post(f"/containers/{container_id}/exec", {
-        "AttachStdout": True,
-        "AttachStderr": False,
-        "Cmd": ["asterisk", "-rx", cmd_str],
-    })
-    if status != 201:
+def exec_asterisk(module, container_name, cmd_str):
+    rc, out, _ = run(["runagent", "-m", module, "podman", "exec", container_name, "asterisk", "-rx", cmd_str])
+    if rc != 0:
         return None
-    try:
-        exec_id = json.loads(raw)["Id"]
-    except:
-        return None
-
-    status2, raw2 = _api_post(f"/exec/{exec_id}/start", {"Detach": False})
-    if status2 not in (200, 101):
-        return None
-    return _parse_mux(raw2)
+    return out
 
 ## Check
 
 def check():
-    if not os.path.exists(PODMAN_SOCK):
-        print(f"2 {SERVICE_SUMMARY} - CRITICAL: podman socket not found at {PODMAN_SOCK}")
+    modules = list_modules()
+    voice_modules = [m for m in modules if "nethvoice" in m or "freepbx" in m]
+
+    if not voice_modules:
+        print(f"0 {SERVICE_SUMMARY} - NethVoice not installed")
         return
 
-    containers = _api_get("/containers/json?all=true")
-    if containers is None:
-        print(f"2 {SERVICE_SUMMARY} - CRITICAL: cannot reach podman socket")
-        return
-
-    cid = find_asterisk_container(containers)
-    if not cid:
-        print(f"0 {SERVICE_SUMMARY} - NethVoice not installed (no Asterisk container found)")
-        return
-
-    output = exec_asterisk(cid, "pjsip show registrations")
-    if output is None:
-        print(f"3 {SERVICE_SUMMARY} - UNKNOWN: exec into Asterisk container failed")
-        return
-
-    trunks = {}
-    for line in output.splitlines():
-        m = STATUS_RE.search(line)
-        if not m:
+    for mod in voice_modules:
+        containers = podman_ps_json(mod)
+        if containers is None:
+            print(f"3 {SERVICE_SUMMARY} - UNKNOWN: cannot query podman for {mod}")
             continue
-        status_str = m.group(1).strip()
-        # Extract trunk name (first non-empty token before status)
-        parts = line.strip().split()
-        trunk_name = parts[0] if parts else "unknown"
-        trunks[trunk_name] = status_str
 
-    if not trunks:
-        print(f"0 {SERVICE_SUMMARY} - OK: no trunks configured")
-        return
+        cname = find_asterisk_name(containers)
+        if not cname:
+            print(f"0 {SERVICE_SUMMARY} - NethVoice not installed (no Asterisk container found)")
+            continue
 
-    total = len(trunks)
-    ok = sum(1 for s in trunks.values() if STATE_MAP.get(s, 0) == 0)
-    warn = sum(1 for s in trunks.values() if STATE_MAP.get(s, 0) == 1)
-    crit_count = sum(1 for s in trunks.values() if STATE_MAP.get(s, 0) == 2)
+        output = exec_asterisk(mod, cname, "pjsip show registrations")
+        if output is None:
+            print(f"3 {SERVICE_SUMMARY} - UNKNOWN: exec into Asterisk container failed")
+            continue
 
-    # One line per trunk
-    for name, st in trunks.items():
-        state = STATE_MAP.get(st, 3)
-        print(f"{state} {SERVICE_PREFIX}.{name} - {st}")
+        trunks = {}
+        for line in output.splitlines():
+            m = STATUS_RE.search(line)
+            if not m:
+                continue
+            status_str = m.group(1).strip()
+            parts = line.strip().split()
+            trunk_name = parts[0] if parts else "unknown"
+            trunks[trunk_name] = status_str
 
-    # Summary line
-    overall = 2 if crit_count > 0 else (1 if warn > 0 else 0)
-    print(f"{overall} {SERVICE_SUMMARY} - total={total} ok={ok} warn={warn} crit={crit_count}")
+        if not trunks:
+            print(f"0 {SERVICE_SUMMARY} - OK: no trunks configured")
+            continue
+
+        total = len(trunks)
+        ok = sum(1 for s in trunks.values() if STATE_MAP.get(s, 0) == 0)
+        warn = sum(1 for s in trunks.values() if STATE_MAP.get(s, 0) == 1)
+        crit_count = sum(1 for s in trunks.values() if STATE_MAP.get(s, 0) == 2)
+
+        for name, st in trunks.items():
+            state = STATE_MAP.get(st, 3)
+            print(f"{state} {SERVICE_PREFIX}.{name} - {st}")
+
+        overall = 2 if crit_count > 0 else (1 if warn > 0 else 0)
+        print(f"{overall} {SERVICE_SUMMARY} - total={total} ok={ok} warn={warn} crit={crit_count}")
 
 check()

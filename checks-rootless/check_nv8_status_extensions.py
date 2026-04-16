@@ -1,21 +1,16 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 #
 # Copyright (C) 2025 Nethesis S.r.l.
 # SPDX-License-Identifier: GPL-2.0-only
 #
 
-# Check NethVoice extension registration status via Podman exec into Asterisk container
-# Container-native version: uses podman socket instead of runagent
+# Check NethVoice extension registration status via runagent + podman exec into Asterisk
 
 import json
-import http.client
-import os
 import re
-import socket as _socket
+import subprocess
 
-VERSION = "2.0.0"
 SERVICE_SUMMARY = "NV8.Status.Extensions"
-PODMAN_SOCK = "/run/podman/podman.sock"
 WARN_PCT = 10.0
 CRIT_PCT = 30.0
 
@@ -28,68 +23,42 @@ ENDPOINT_RE = re.compile(
 
 ## Utils
 
-class _UnixConn(http.client.HTTPConnection):
-    def connect(self):
-        self.sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-        self.sock.connect(PODMAN_SOCK)
-
-def _api_get(path):
+def run(cmd):
     try:
-        c = _UnixConn("d")
-        c.request("GET", f"/v4.0.0/libpod{path}")
-        r = c.getresponse()
-        return json.loads(r.read()) if r.status == 200 else None
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return p.returncode, p.stdout, p.stderr
+    except Exception as e:
+        return 1, "", str(e)
+
+def list_modules():
+    rc, out, _ = run(["runagent", "-l"])
+    if rc != 0:
+        return []
+    return [l.strip() for l in out.splitlines() if l.strip()]
+
+def podman_ps_json(module):
+    rc, out, _ = run(["runagent", "-m", module, "podman", "ps", "--all", "--format", "json"])
+    if rc != 0:
+        return None
+    try:
+        return json.loads(out)
     except:
         return None
 
-def _api_post(path, body):
-    try:
-        data = json.dumps(body).encode()
-        c = _UnixConn("d")
-        c.request("POST", f"/v4.0.0/libpod{path}", body=data,
-                  headers={"Content-Type": "application/json"})
-        r = c.getresponse()
-        return r.status, r.read()
-    except:
-        return 0, b""
-
-def _parse_mux(raw):
-    out = b""
-    i = 0
-    while i + 8 <= len(raw):
-        size = int.from_bytes(raw[i + 4:i + 8], "big")
-        out += raw[i + 8:i + 8 + size]
-        i += 8 + size
-    return out.decode("utf-8", errors="replace")
-
-def find_asterisk_container(containers):
+def find_asterisk_name(containers):
     for c in containers:
-        if c.get("IsInfra", False):
+        if c.get("IsInfra", False) or c.get("State") != "running":
             continue
-        if c.get("State") != "running":
-            continue
-        for n in c.get("Names", []):
+        for n in (c.get("Names") or []):
             if "asterisk" in n.lower() or "freepbx" in n.lower():
-                return c.get("Id", "")
+                return n.lstrip("/")
     return None
 
-def exec_asterisk(container_id, cmd_str):
-    status, raw = _api_post(f"/containers/{container_id}/exec", {
-        "AttachStdout": True,
-        "AttachStderr": False,
-        "Cmd": ["asterisk", "-rx", cmd_str],
-    })
-    if status != 201:
+def exec_asterisk(module, container_name, cmd_str):
+    rc, out, _ = run(["runagent", "-m", module, "podman", "exec", container_name, "asterisk", "-rx", cmd_str])
+    if rc != 0:
         return None
-    try:
-        exec_id = json.loads(raw)["Id"]
-    except:
-        return None
-
-    status2, raw2 = _api_post(f"/exec/{exec_id}/start", {"Detach": False})
-    if status2 not in (200, 101):
-        return None
-    return _parse_mux(raw2)
+    return out
 
 def parse_endpoints(output):
     endpoints = {}
@@ -105,42 +74,46 @@ def parse_endpoints(output):
 ## Check
 
 def check():
-    if not os.path.exists(PODMAN_SOCK):
-        print(f"2 {SERVICE_SUMMARY} - CRITICAL: podman socket not found at {PODMAN_SOCK}")
+    modules = list_modules()
+    voice_modules = [m for m in modules if "nethvoice" in m or "freepbx" in m]
+
+    if not voice_modules:
+        print(f"0 {SERVICE_SUMMARY} - NethVoice not installed")
         return
 
-    containers = _api_get("/containers/json?all=true")
-    if containers is None:
-        print(f"2 {SERVICE_SUMMARY} - CRITICAL: cannot reach podman socket")
-        return
+    for mod in voice_modules:
+        containers = podman_ps_json(mod)
+        if containers is None:
+            print(f"3 {SERVICE_SUMMARY} - UNKNOWN: cannot query podman for {mod}")
+            continue
 
-    cid = find_asterisk_container(containers)
-    if not cid:
-        print(f"0 {SERVICE_SUMMARY} - NethVoice not installed (no Asterisk container found)")
-        return
+        cname = find_asterisk_name(containers)
+        if not cname:
+            print(f"0 {SERVICE_SUMMARY} - NethVoice not installed (no Asterisk container found)")
+            continue
 
-    output = exec_asterisk(cid, "pjsip show endpoints")
-    if output is None:
-        print(f"3 {SERVICE_SUMMARY} - UNKNOWN: exec into Asterisk container failed")
-        return
+        output = exec_asterisk(mod, cname, "pjsip show endpoints")
+        if output is None:
+            print(f"3 {SERVICE_SUMMARY} - UNKNOWN: exec into Asterisk container failed")
+            continue
 
-    endpoints = parse_endpoints(output)
-    if not endpoints:
-        print(f"0 {SERVICE_SUMMARY} - OK: no endpoints configured")
-        return
+        endpoints = parse_endpoints(output)
+        if not endpoints:
+            print(f"0 {SERVICE_SUMMARY} - OK: no endpoints configured")
+            continue
 
-    total = len(endpoints)
-    unreg = {n: s for n, s in endpoints.items() if s not in REGISTERED_STATES}
-    unreg_count = len(unreg)
-    unreg_pct = (unreg_count / total * 100) if total > 0 else 0.0
+        total = len(endpoints)
+        unreg = {n: s for n, s in endpoints.items() if s not in REGISTERED_STATES}
+        unreg_count = len(unreg)
+        unreg_pct = (unreg_count / total * 100) if total > 0 else 0.0
 
-    state = 2 if unreg_pct >= CRIT_PCT else (1 if unreg_pct >= WARN_PCT else 0)
-    label = "CRITICAL" if state == 2 else ("WARNING" if state == 1 else "OK")
+        state = 2 if unreg_pct >= CRIT_PCT else (1 if unreg_pct >= WARN_PCT else 0)
+        label = "CRITICAL" if state == 2 else ("WARNING" if state == 1 else "OK")
 
-    if unreg:
-        detail = ", ".join(f"{n}({s})" for n, s in list(unreg.items())[:5])
-        print(f"{state} {SERVICE_SUMMARY} - {label}: {unreg_count}/{total} not registered ({unreg_pct:.1f}%) - {detail}")
-    else:
-        print(f"0 {SERVICE_SUMMARY} - OK: all {total} extensions registered")
+        if unreg:
+            detail = ", ".join(f"{n}({s})" for n, s in list(unreg.items())[:5])
+            print(f"{state} {SERVICE_SUMMARY} - {label}: {unreg_count}/{total} not registered ({unreg_pct:.1f}%) - {detail}")
+        else:
+            print(f"0 {SERVICE_SUMMARY} - OK: all {total} extensions registered")
 
 check()
