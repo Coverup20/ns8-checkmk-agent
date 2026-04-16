@@ -76,14 +76,20 @@ def ask_frpc():
     return params
 
 def build_run_cmd(tag, container_name, frpc_env):
+    has_frpc = bool(frpc_env)
     lines = [
         "podman run -d",
         f"  --name {container_name}",
         "  --restart unless-stopped",
         "  --privileged --pid=host --cgroupns=host",
         "  --security-opt label=disable",
-        "  -p 6556:6556",
     ]
+
+    # Expose port 6556 only if frpc is NOT configured (direct access mode).
+    # With frpc the tunnel handles connectivity — binding 6556 may conflict
+    # with a native check-mk-agent already listening on the host.
+    if not has_frpc:
+        lines.append("  -p 6556:6556")
 
     for k, v in frpc_env.items():
         lines.append(f"  -e {k}={shlex.quote(v)}")
@@ -126,6 +132,29 @@ def main():
         return
 
     host = ask("SSH host alias (from ~/.ssh/config)")
+    cmk_url = ask("CheckMK agents URL (needed if image must be built)", "https://monitor.nethlab.it/monitoring/check_mk/agents")
+
+    # Check if image exists on remote host, build if needed
+    check = subprocess.run(
+        ["ssh", host, f"podman image exists localhost/checkmk-agent:{tag} && echo EXISTS || echo MISSING"],
+        capture_output=True, text=True
+    )
+    if "MISSING" in check.stdout:
+        print(f"\n[deploy] Image checkmk-agent:{tag} not found on {host} — building now...")
+        build_cmd = (
+            f"cd /opt/ns8-checkmk-agent && "
+            f"git fetch origin && git reset --hard origin/main && "
+            f"podman build -f Dockerfile{'.runagent' if tag == 'runagent' else ''} "
+            f"--build-arg CMK_AGENT_URL={cmk_url} "
+            f"-t checkmk-agent:{tag} . "
+            f"2>&1 | tail -5"
+        )
+        rc = run_ssh(host, build_cmd)
+        if rc != 0:
+            print(f"\n[deploy] ERROR: build failed (exit {rc})")
+            sys.exit(1)
+    else:
+        print(f"\n[deploy] Image checkmk-agent:{tag} already present on {host}")
 
     if ask_yn(f"Stop and remove existing '{container_name}' first?", "y"):
         run_ssh(host, f"podman stop {container_name} 2>/dev/null; podman rm {container_name} 2>/dev/null; echo 'old container removed'")
