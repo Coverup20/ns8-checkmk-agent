@@ -14,6 +14,7 @@ RUN microdnf install -y \
     python3 \
     socat \
     curl \
+    tar \
     && microdnf clean all
 
 # Install frpc (Fast Reverse Proxy client) — used only when /etc/frp/frpc.toml is mounted
