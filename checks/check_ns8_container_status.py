@@ -47,8 +47,10 @@ def check():
         print(f"0 {SERVICE} - OK: no containers found")
         return
 
-    total = len(real)
-    stopped = [c for c in real if c.get("State") != "running"]
+    # Exclude one-shot containers: exited with code 0 = completed successfully
+    services = [c for c in real if not (c.get("State") == "exited" and c.get("ExitCode", 1) == 0)]
+    total = len(services)
+    stopped = [c for c in services if c.get("State") != "running"]
 
     if not stopped:
         print(f"0 {SERVICE} - OK: all containers running ({total}/{total})")

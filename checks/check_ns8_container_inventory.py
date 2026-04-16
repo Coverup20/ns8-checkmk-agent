@@ -43,12 +43,14 @@ def check():
         return
 
     real = [c for c in containers if not c.get("IsInfra", False)]
-    total = len(real)
-    running = sum(1 for c in real if c.get("State") == "running")
+    # Exclude one-shot containers: exited with code 0 = completed successfully
+    services = [c for c in real if not (c.get("State") == "exited" and c.get("ExitCode", 1) == 0)]
+    total = len(services)
+    running = sum(1 for c in services if c.get("State") == "running")
     stopped = total - running
 
     names = []
-    for c in real:
+    for c in services:
         raw_name = c.get("Names", ["?"])[0].lstrip("/")
         image = c.get("Image", "").split("/")[-1].split(":")[0]
         names.append(f"{raw_name}:{image}")
