@@ -1,5 +1,11 @@
 FROM rockylinux:9-minimal
 
+# CheckMK server base URL and agent version — override at build time:
+#   podman build --build-arg CMK_VERSION=2.4.0p27 -t checkmk-agent:test .
+#   podman build --build-arg CMK_AGENT_URL=https://other-server/site/check_mk/agents -t checkmk-agent:test .
+ARG CMK_AGENT_URL=https://YOUR_CHECKMK_SERVER/monitoring/check_mk/agents
+ARG CMK_VERSION=2.4.0p26
+
 # Install dependencies
 RUN microdnf install -y \
     python3 \
@@ -8,8 +14,8 @@ RUN microdnf install -y \
     curl \
     && microdnf clean all
 
-# Install CheckMK agent 2.4.0p26 (same version as server)
-RUN curl -fsSL https://download.checkmk.com/checkmk/2.4.0p26/check-mk-agent-2.4.0p26-1.noarch.rpm \
+# Install CheckMK agent from internal server (same version as server)
+RUN curl -fsSL "${CMK_AGENT_URL}/check-mk-agent-${CMK_VERSION}-1.noarch.rpm" \
     -o /tmp/check-mk-agent.rpm && \
     rpm -ivh /tmp/check-mk-agent.rpm && \
     rm -f /tmp/check-mk-agent.rpm
