@@ -67,6 +67,8 @@ def parse_endpoints(output):
         if not m:
             continue
         name = m.group(1).split("/")[0]
+        if name.lower() == "anonymous":
+            continue
         state = m.group(2).strip().lower()
         endpoints[name] = state
     return endpoints
