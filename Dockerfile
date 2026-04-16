@@ -24,17 +24,25 @@ RUN set -e; \
     rpm -ivh /tmp/check-mk-agent.rpm && \
     rm -f /tmp/check-mk-agent.rpm
 
-# Clone checkmk-tools repository
+# Clone checkmk-tools repository (base scripts: smoke_test, sos, webtop, etc.)
 RUN git clone https://github.com/nethesis/checkmk-tools.git /opt/checkmk-tools
 
-# Deploy NS8 local checks (strip .py extension, set executable)
+# Deploy base NS8 local checks from checkmk-tools (strip .py extension, set executable)
 RUN for f in /opt/checkmk-tools/script-check-ns8/full/*.py; do \
         base=$(basename "$f" .py); \
         cp "$f" "/usr/lib/check_mk_agent/local/$base"; \
         chmod +x "/usr/lib/check_mk_agent/local/$base"; \
     done && \
-    mv /usr/lib/check_mk_agent/local/monitor_podman_events \
-       /usr/lib/check_mk_agent/local/check_podman_events
+    rm -f /usr/lib/check_mk_agent/local/monitor_podman_events
+
+# Copy container-native checks (override runagent-based versions from checkmk-tools)
+COPY checks/ /tmp/checks/
+RUN for f in /tmp/checks/*.py; do \
+        base=$(basename "$f" .py); \
+        cp "$f" "/usr/lib/check_mk_agent/local/$base"; \
+        chmod +x "/usr/lib/check_mk_agent/local/$base"; \
+    done && \
+    rm -rf /tmp/checks
 
 # Expose CheckMK agent port
 EXPOSE 6556
