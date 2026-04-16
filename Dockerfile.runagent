@@ -1,0 +1,55 @@
+FROM rockylinux:9-minimal
+
+# Full NS8 build — includes runagent support for rootless module container inspection.
+# Requires runtime mounts: see README.md "Full NS8 deployment" section.
+#
+# Build:
+#   podman build -f Dockerfile.runagent -t checkmk-agent:runagent .
+#   podman build -f Dockerfile.runagent --build-arg CMK_AGENT_URL=https://<server>/<site>/check_mk/agents -t checkmk-agent:runagent .
+
+ARG CMK_AGENT_URL=https://YOUR_CHECKMK_SERVER/monitoring/check_mk/agents
+
+# Install dependencies + libraries needed by host podman binary (mounted at runtime)
+RUN microdnf install -y \
+    python3 \
+    socat \
+    curl \
+    procps-ng \
+    shadow-utils \
+    shadow-utils-subid \
+    libseccomp \
+    && microdnf clean all
+
+# Wrap /usr/bin/env to inject PYTHONPATH into runagent re-exec sub-process.
+# runagent calls: runuser -s /usr/bin/env -l <module> -- XDG_RUNTIME_DIR=... runagent ...
+# The -l flag resets all env vars, so PYTHONPATH is lost without this wrapper.
+RUN mv /usr/bin/env /usr/bin/env.orig && \
+    printf '#!/bin/sh\nexec /usr/bin/env.orig PYTHONPATH=/usr/local/agent/pypkg "$@"\n' > /usr/bin/env && \
+    chmod +x /usr/bin/env
+
+# Install CheckMK agent — version auto-detected from server agents listing
+RUN set -e; \
+    RPM_FILE=$(curl -fsSL "${CMK_AGENT_URL}/" \
+        | grep -oE 'check-mk-agent-[0-9][^"]+\.noarch\.rpm' \
+        | head -1); \
+    [ -n "$RPM_FILE" ] || { echo "ERROR: could not detect agent RPM from ${CMK_AGENT_URL}/"; exit 1; }; \
+    echo "Detected agent package: ${RPM_FILE}"; \
+    curl -fsSL "${CMK_AGENT_URL}/${RPM_FILE}" -o /tmp/check-mk-agent.rpm && \
+    rpm -ivh /tmp/check-mk-agent.rpm && \
+    rm -f /tmp/check-mk-agent.rpm
+
+# Deploy checks from checks/ (always) and checks-rootless/ (runagent-capable scripts)
+COPY checks/ /tmp/checks/
+COPY checks-rootless/ /tmp/checks-rootless/
+RUN for f in /tmp/checks/*.py /tmp/checks-rootless/*.py; do \
+        [ -f "$f" ] || continue; \
+        base=$(basename "$f" .py); \
+        sed -i 's/\r//' "$f"; \
+        cp "$f" "/usr/lib/check_mk_agent/local/$base"; \
+        chmod +x "/usr/lib/check_mk_agent/local/$base"; \
+    done && \
+    rm -rf /tmp/checks /tmp/checks-rootless
+
+EXPOSE 6556
+
+ENTRYPOINT ["socat", "TCP-LISTEN:6556,reuseaddr,fork,keepalive", "EXEC:/usr/bin/check_mk_agent"]

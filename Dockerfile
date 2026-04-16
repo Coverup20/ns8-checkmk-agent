@@ -1,7 +1,7 @@
 FROM rockylinux:9-minimal
 
 # CheckMK server base URL — override at build time if needed:
-#   podman build --build-arg CMK_AGENT_URL=https://other-server/site/check_mk/agents -t checkmk-agent:test .
+#   podman build --build-arg CMK_AGENT_URL=https://other-server/site/check_mk/agents -t checkmk-agent:latest .
 # The agent version is auto-detected from the server listing — no need to hardcode it.
 ARG CMK_AGENT_URL=https://YOUR_CHECKMK_SERVER/monitoring/check_mk/agents
 
@@ -10,16 +10,7 @@ RUN microdnf install -y \
     python3 \
     socat \
     curl \
-    procps-ng \
-    shadow-utils \
-    shadow-utils-subid \
-    libseccomp \
     && microdnf clean all
-
-# Wrap /usr/bin/env to inject PYTHONPATH so runagent sub-processes (runuser -l re-exec) find the agent module
-RUN mv /usr/bin/env /usr/bin/env.orig && \
-    printf '#!/bin/sh\nexec /usr/bin/env.orig PYTHONPATH=/usr/local/agent/pypkg "$@"\n' > /usr/bin/env && \
-    chmod +x /usr/bin/env
 
 # Install CheckMK agent — version auto-detected from server agents listing
 RUN set -e; \
