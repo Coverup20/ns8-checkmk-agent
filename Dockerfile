@@ -10,6 +10,7 @@ RUN microdnf install -y \
     python3 \
     socat \
     curl \
+    procps-ng \
     && microdnf clean all
 
 # Install CheckMK agent — version auto-detected from server agents listing
