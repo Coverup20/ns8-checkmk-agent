@@ -7,7 +7,7 @@ FROM rockylinux:9-minimal
 #   podman build -f Dockerfile.runagent -t checkmk-agent:runagent .
 #   podman build -f Dockerfile.runagent --build-arg CMK_AGENT_URL=https://<server>/<site>/check_mk/agents -t checkmk-agent:runagent .
 
-ARG CMK_AGENT_URL=https://YOUR_CHECKMK_SERVER/monitoring/check_mk/agents
+ARG CMK_AGENT_URL
 
 # Install dependencies + libraries needed by host podman binary (mounted at runtime)
 RUN microdnf install -y \

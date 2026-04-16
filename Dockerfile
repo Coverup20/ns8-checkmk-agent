@@ -1,9 +1,9 @@
 FROM rockylinux:9-minimal
 
-# CheckMK server base URL — override at build time if needed:
-#   podman build --build-arg CMK_AGENT_URL=https://other-server/site/check_mk/agents -t checkmk-agent:latest .
-# The agent version is auto-detected from the server listing — no need to hardcode it.
-ARG CMK_AGENT_URL=https://YOUR_CHECKMK_SERVER/monitoring/check_mk/agents
+# CheckMK server base URL — REQUIRED at build time:
+#   podman build --build-arg CMK_AGENT_URL=https://<checkmk-server>/<site>/check_mk/agents -t checkmk-agent:latest .
+# The agent version is auto-detected from the server agents listing.
+ARG CMK_AGENT_URL
 
 # Install dependencies
 RUN microdnf install -y \
