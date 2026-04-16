@@ -12,6 +12,7 @@ RUN microdnf install -y \
     curl \
     procps-ng \
     shadow-utils \
+    shadow-utils-subid \
     libseccomp \
     && microdnf clean all
 
