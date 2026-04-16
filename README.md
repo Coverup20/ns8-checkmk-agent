@@ -28,6 +28,34 @@ podman build \
   -t checkmk-agent:latest .
 ```
 
+## Pre-built images (GitHub Actions)
+
+Every push to `main` automatically builds and publishes two images to
+`ghcr.io/coverup20/ns8-checkmk-agent`:
+
+| Tag | Description |
+|---|---|
+| `:runagent` | Full NS8 build — runagent + all module checks |
+| `:base` | Minimal build — system checks + SOS only |
+
+Pull directly on the target host:
+
+```bash
+podman pull ghcr.io/coverup20/ns8-checkmk-agent:runagent
+```
+
+### Setting up GitHub Actions secret (one-time)
+
+The image build requires downloading the CheckMK agent RPM from your monitoring server.
+Add `CMK_AGENT_URL` as a repository secret:
+
+1. GitHub → repository → **Settings** → **Secrets and variables** → **Actions**
+2. **New repository secret**
+3. Name: `CMK_AGENT_URL`
+4. Value: `https://<your-checkmk-server>/<site>/check_mk/agents`
+
+Without this secret the docker-image build steps will fail (the Nethesis module step is unaffected).
+
 ## Deploy
 
 The container needs several bind mounts from the NS8 host to support `runagent`

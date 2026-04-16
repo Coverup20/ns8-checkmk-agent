@@ -12,7 +12,9 @@ import sys
 import subprocess
 import shlex
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+
+GHCR_REPO = "ghcr.io/coverup20/ns8-checkmk-agent"
 
 ## Utils
 
@@ -75,7 +77,7 @@ def ask_frpc():
         params["FRPC_TLS"] = tls
     return params
 
-def build_run_cmd(tag, container_name, frpc_env):
+def build_run_cmd(tag, container_name, frpc_env, image_ref):
     has_frpc = bool(frpc_env)
     lines = [
         "podman run -d",
@@ -110,7 +112,7 @@ def build_run_cmd(tag, container_name, frpc_env):
             "  -v /home:/home:ro",
         ]
 
-    lines.append(f"  localhost/checkmk-agent:{tag}")
+    lines.append(f"  {image_ref}")
     return " \\\n".join(lines)
 
 def main():
@@ -120,43 +122,74 @@ def main():
     tag            = choose_variant()
     container_name = ask("\nContainer name", "checkmk-agent")
     frpc_env       = ask_frpc()
-    cmd            = build_run_cmd(tag, container_name, frpc_env)
-
-    print("\n" + "=" * 52)
-    print("Generated command:\n")
-    print(cmd)
-    print("=" * 52)
 
     if not ask_yn("\nExecute via SSH on a remote host now?", "n"):
-        print("\nCopy the command above and run it on the target host manually.")
+        # No SSH target — just print the command with the ghcr.io reference
+        image_ref = f"{GHCR_REPO}:{tag}"
+        cmd = build_run_cmd(tag, container_name, frpc_env, image_ref)
+        print("\n" + "=" * 52)
+        print("Generated command (pull image first if not present):\n")
+        print(f"  podman pull {image_ref}\n")
+        print(cmd)
+        print("=" * 52)
         return
 
     host = ask("SSH host alias (from ~/.ssh/config)")
-    cmk_url = ask("CheckMK agents URL (needed if image must be built)", "https://monitor.nethlab.it/monitoring/check_mk/agents")
 
-    # Check if image exists on remote host, build if needed
+    # Determine image ref: prefer ghcr.io, fall back to local build
+    ghcr_ref  = f"{GHCR_REPO}:{tag}"
+    local_ref = f"localhost/checkmk-agent:{tag}"
+
+    # Check what is already available on the remote host
     check = subprocess.run(
-        ["ssh", host, f"podman image exists localhost/checkmk-agent:{tag} && echo EXISTS || echo MISSING"],
+        ["ssh", host, (
+            f"podman image exists {ghcr_ref} && echo GHCR_OK || "
+            f"podman image exists {local_ref} && echo LOCAL_OK || "
+            f"echo MISSING"
+        )],
         capture_output=True, text=True
     )
-    if "MISSING" in check.stdout:
-        print(f"\n[deploy] Image checkmk-agent:{tag} not found on {host} — building now...")
-        build_cmd = (
-            f"cd /opt/ns8-checkmk-agent && "
-            f"git fetch origin && git reset --hard origin/main && "
-            f"podman build -f Dockerfile{'.runagent' if tag == 'runagent' else ''} "
-            f"--build-arg CMK_AGENT_URL={cmk_url} "
-            f"-t checkmk-agent:{tag} . "
-            f"2>&1 | tail -5"
-        )
-        rc = run_ssh(host, build_cmd)
-        if rc != 0:
-            print(f"\n[deploy] ERROR: build failed (exit {rc})")
-            sys.exit(1)
-    else:
-        print(f"\n[deploy] Image checkmk-agent:{tag} already present on {host}")
+    status = check.stdout.strip()
 
-    if ask_yn(f"Stop and remove existing '{container_name}' first?", "y"):
+    if "GHCR_OK" in status:
+        image_ref = ghcr_ref
+        print(f"\n[deploy] Image {ghcr_ref} already present on {host}")
+
+    elif "LOCAL_OK" in status:
+        image_ref = local_ref
+        print(f"\n[deploy] Local image {local_ref} found on {host} (no ghcr.io pull needed)")
+
+    else:
+        print(f"\n[deploy] Image not found on {host} — trying to pull from ghcr.io...")
+        pull_rc = run_ssh(host, f"podman pull {ghcr_ref} 2>&1")
+        if pull_rc == 0:
+            image_ref = ghcr_ref
+            print(f"\n[deploy] Pull successful: {ghcr_ref}")
+        else:
+            print(f"\n[deploy] Pull failed. Falling back to local build.")
+            cmk_url = ask("CheckMK agents URL (needed to build the image)",
+                          "https://monitor.nethlab.it/monitoring/check_mk/agents")
+            build_cmd = (
+                f"cd /opt/ns8-checkmk-agent && "
+                f"git fetch origin && git reset --hard origin/main && "
+                f"podman build -f Dockerfile{'.runagent' if tag == 'runagent' else ''} "
+                f"--build-arg CMK_AGENT_URL={cmk_url} "
+                f"-t {local_ref} . "
+                f"2>&1 | tail -5"
+            )
+            rc = run_ssh(host, build_cmd)
+            if rc != 0:
+                print(f"\n[deploy] ERROR: build failed (exit {rc})")
+                sys.exit(1)
+            image_ref = local_ref
+
+    cmd = build_run_cmd(tag, container_name, frpc_env, image_ref)
+    print("\n" + "=" * 52)
+    print("Command to run:\n")
+    print(cmd)
+    print("=" * 52)
+
+    if ask_yn(f"\nStop and remove existing '{container_name}' first?", "y"):
         run_ssh(host, f"podman stop {container_name} 2>/dev/null; podman rm {container_name} 2>/dev/null; echo 'old container removed'")
 
     rc = run_ssh(host, cmd)

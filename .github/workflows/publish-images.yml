@@ -11,6 +11,58 @@ permissions:
   security-events: write
 
 jobs:
+  publish-docker-images:
+    name: "Build and publish checkmk-agent Docker images"
+    runs-on: ubuntu-latest
+    env:
+      REPOBASE: ghcr.io/${{ github.repository_owner }}
+      IMAGETAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push runagent image
+        run: |
+          repobase="${REPOBASE,,}"
+          imagetag=$(printf '%s' "${IMAGETAG}" | tr '/' '-')
+          image="${repobase}/ns8-checkmk-agent"
+
+          docker build \
+            --build-arg CMK_AGENT_URL=${{ secrets.CMK_AGENT_URL }} \
+            -f Dockerfile.runagent \
+            -t "${image}:runagent-${imagetag}" \
+            .
+          docker push "${image}:runagent-${imagetag}"
+
+          if [[ "${imagetag}" == "main" || "${imagetag}" == "master" ]]; then
+            docker tag "${image}:runagent-${imagetag}" "${image}:runagent"
+            docker push "${image}:runagent"
+          fi
+
+      - name: Build and push base image
+        run: |
+          repobase="${REPOBASE,,}"
+          imagetag=$(printf '%s' "${IMAGETAG}" | tr '/' '-')
+          image="${repobase}/ns8-checkmk-agent"
+
+          docker build \
+            --build-arg CMK_AGENT_URL=${{ secrets.CMK_AGENT_URL }} \
+            -f Dockerfile \
+            -t "${image}:base-${imagetag}" \
+            .
+          docker push "${image}:base-${imagetag}"
+
+          if [[ "${imagetag}" == "main" || "${imagetag}" == "master" ]]; then
+            docker tag "${image}:base-${imagetag}" "${image}:base"
+            docker push "${image}:base"
+          fi
+
   publish-images:
     if: github.run_number > 1
     uses: NethServer/ns8-github-actions/.github/workflows/publish-branch.yml@v1
