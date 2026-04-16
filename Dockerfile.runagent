@@ -9,6 +9,10 @@ FROM rockylinux:9-minimal
 
 ARG CMK_AGENT_URL
 
+# frpc version to embed — override at build time if needed:
+#   podman build --build-arg FRP_VERSION=0.68.1 -f Dockerfile.runagent ...
+ARG FRP_VERSION=0.68.1
+
 # Install dependencies + libraries needed by host podman binary (mounted at runtime)
 RUN microdnf install -y \
     python3 \
@@ -19,6 +23,11 @@ RUN microdnf install -y \
     shadow-utils-subid \
     libseccomp \
     && microdnf clean all
+
+# Install frpc (Fast Reverse Proxy client) — used only when /etc/frp/frpc.toml is mounted
+RUN curl -fsSL "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_amd64.tar.gz" \
+    | tar -xz --strip-components=1 -C /usr/local/bin/ "frp_${FRP_VERSION}_linux_amd64/frpc" && \
+    chmod +x /usr/local/bin/frpc
 
 # Set PYTHONPATH so runagent can import 'agent' module on first invocation.
 # The env wrapper below keeps it set also after runuser -l resets the environment.
@@ -56,4 +65,12 @@ RUN for f in /tmp/checks/*.py /tmp/checks-rootless/*.py; do \
 
 EXPOSE 6556
 
-ENTRYPOINT ["socat", "TCP-LISTEN:6556,reuseaddr,fork,keepalive", "EXEC:/usr/bin/check_mk_agent"]
+# Entrypoint: starts frpc if /etc/frp/frpc.toml is mounted, then socat.
+# Mount frpc config at runtime to enable the tunnel:
+#   -v /etc/frp/frpc.toml:/etc/frp/frpc.toml:ro
+# Override config path via env if needed:
+#   -e FRPC_CONFIG=/path/to/frpc.toml
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
