@@ -39,6 +39,7 @@ RUN for f in /opt/checkmk-tools/script-check-ns8/full/*.py; do \
 COPY checks/ /tmp/checks/
 RUN for f in /tmp/checks/*.py; do \
         base=$(basename "$f" .py); \
+        sed -i 's/\r//' "$f"; \
         cp "$f" "/usr/lib/check_mk_agent/local/$base"; \
         chmod +x "/usr/lib/check_mk_agent/local/$base"; \
     done && \
