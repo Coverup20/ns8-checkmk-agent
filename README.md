@@ -54,8 +54,8 @@ podman run -d \
   --restart=always \
   --privileged \
   --pid=host \
+  --cgroupns=host \
   -p 6556:6556 \
-  -e PYTHONPATH=/usr/local/agent/pypkg \
   -v /usr/local/agent:/usr/local/agent:ro \
   -v /usr/local/bin/runagent:/usr/local/bin/runagent:ro \
   -v /usr/bin/python3.11:/usr/bin/python3.11:ro \
@@ -74,8 +74,9 @@ podman run -d \
 
 ### Mount reference
 
-| Mount | Purpose |
+| Flag / Mount | Purpose |
 |---|---|
+| `--cgroupns=host` | Share host cgroup namespace — required for `podman exec` into rootless module containers |
 | `/usr/local/agent` | NS8 agent Python environment (runagent runtime) |
 | `/usr/local/bin/runagent` | NS8 runagent binary |
 | `/usr/bin/python3.11` | Python 3.11 binary (required by runagent shebang) |
@@ -96,7 +97,13 @@ context to those users via `runuser -l` to run commands in their environment.
 The container's `/usr/bin/env` is wrapped to inject `PYTHONPATH=/usr/local/agent/pypkg`
 into the `runuser` sub-process environment (since `runuser -l` resets all env vars).
 This allows the second `runagent` invocation (running as the module user) to find the
-NS8 `agent` Python module.
+NS8 `agent` Python module. `PYTHONPATH` is also set via `ENV` in the image for the
+initial invocation.
+
+**`--cgroupns=host` is required** for `podman exec` into rootless module containers.
+Without it, the container uses a private cgroup namespace and cannot see the cgroup
+paths of `user.slice/user-<uid>.slice/...` where module containers live. This causes
+`podman exec` to fail with `crun: write to /sys/fs/cgroup/.../cgroup.procs: No such file or directory`.
 
 Example - list webtop3 containers from inside the running container:
 
@@ -114,8 +121,8 @@ at build time. Currently deployed:
 | `check-sos` | `SOS.Session` | Checks whether an active SOS support session is running |
 
 Additional NS8-aware check scripts are in `checks-rootless/` and use `runagent`
-to inspect module containers. They are not deployed by default - copy selected
-scripts into `checks/` to include them in the image.
+to inspect module containers. They are deployed by `Dockerfile.runagent` (Full NS8 build).
+To include them in the minimal build, copy selected scripts into `checks/`.
 
 ## Stopping and removing
 

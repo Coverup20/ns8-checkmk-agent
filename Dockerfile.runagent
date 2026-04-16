@@ -20,6 +20,10 @@ RUN microdnf install -y \
     libseccomp \
     && microdnf clean all
 
+# Set PYTHONPATH so runagent can import 'agent' module on first invocation.
+# The env wrapper below keeps it set also after runuser -l resets the environment.
+ENV PYTHONPATH=/usr/local/agent/pypkg
+
 # Wrap /usr/bin/env to inject PYTHONPATH into runagent re-exec sub-process.
 # runagent calls: runuser -s /usr/bin/env -l <module> -- XDG_RUNTIME_DIR=... runagent ...
 # The -l flag resets all env vars, so PYTHONPATH is lost without this wrapper.
