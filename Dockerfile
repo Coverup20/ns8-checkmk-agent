@@ -1,10 +1,9 @@
 FROM rockylinux:9-minimal
 
-# CheckMK server base URL and agent version — override at build time:
-#   podman build --build-arg CMK_VERSION=2.4.0p27 -t checkmk-agent:test .
+# CheckMK server base URL — override at build time if needed:
 #   podman build --build-arg CMK_AGENT_URL=https://other-server/site/check_mk/agents -t checkmk-agent:test .
+# The agent version is auto-detected from the server listing — no need to hardcode it.
 ARG CMK_AGENT_URL=https://YOUR_CHECKMK_SERVER/monitoring/check_mk/agents
-ARG CMK_VERSION=2.4.0p26
 
 # Install dependencies
 RUN microdnf install -y \
@@ -14,9 +13,14 @@ RUN microdnf install -y \
     curl \
     && microdnf clean all
 
-# Install CheckMK agent from internal server (same version as server)
-RUN curl -fsSL "${CMK_AGENT_URL}/check-mk-agent-${CMK_VERSION}-1.noarch.rpm" \
-    -o /tmp/check-mk-agent.rpm && \
+# Install CheckMK agent — version auto-detected from server agents listing
+RUN set -e; \
+    RPM_FILE=$(curl -fsSL "${CMK_AGENT_URL}/" \
+        | grep -oE 'check-mk-agent-[0-9][^"]+\.noarch\.rpm' \
+        | head -1); \
+    [ -n "$RPM_FILE" ] || { echo "ERROR: could not detect agent RPM from ${CMK_AGENT_URL}/"; exit 1; }; \
+    echo "Detected agent package: ${RPM_FILE}"; \
+    curl -fsSL "${CMK_AGENT_URL}/${RPM_FILE}" -o /tmp/check-mk-agent.rpm && \
     rpm -ivh /tmp/check-mk-agent.rpm && \
     rm -f /tmp/check-mk-agent.rpm
 
